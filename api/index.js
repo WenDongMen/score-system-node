@@ -1,5 +1,7 @@
-// -------------------------- 环境配置 --------------------------
+// 环境变量配置
 require('dotenv').config();
+
+// 核心依赖引入
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
@@ -7,20 +9,20 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const Redis = require('ioredis');
 const dayjs = require('dayjs');
-const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 
 // 初始化Express应用
 const app = express();
-const PORT = process.env.PORT || 80;
+const PORT = process.env.PORT || 8080;
 const ENV = process.env.ENV || 'production';
 
+// ===================== 基础配置 =====================
 // 中间件配置
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// -------------------------- 常量配置 --------------------------
+// ===================== 常量配置 =====================
 // 数据库配置
 const DB_CONFIG = {
   host: process.env.DB_HOST || 'localhost',
@@ -34,7 +36,7 @@ const DB_CONFIG = {
 };
 
 // JWT配置
-const SECRET_KEY = process.env.SECRET_KEY || 'your-strong-secret-key-here-1234567890';
+const SECRET_KEY = process.env.SECRET_KEY || 'score-system-secret-key-2026';
 const TOKEN_EXPIRE_HOURS = parseInt(process.env.TOKEN_EXPIRE_HOURS) || 24;
 
 // 安全配置
@@ -52,7 +54,7 @@ const REDIS_CONFIG = {
   ssl: process.env.REDIS_SSL === 'True'
 };
 
-// -------------------------- 工具初始化 --------------------------
+// ===================== 工具初始化 =====================
 // Redis客户端（无配置则禁用）
 let redisClient = null;
 try {
@@ -66,19 +68,19 @@ try {
       connectTimeout: 5000,
       retryStrategy: (times) => Math.min(times * 100, 3000)
     });
-    console.log('Redis连接成功');
+    console.log('✅ Redis连接成功');
   } else {
-    console.log('未配置Redis，禁用缓存');
+    console.log('ℹ️ 未配置Redis，禁用缓存功能');
   }
 } catch (err) {
-  console.error('Redis连接失败：', err.message);
+  console.error('❌ Redis连接失败：', err.message);
   redisClient = null;
 }
 
 // 防暴力登录存储（内存版，单实例有效）
 const loginAttempts = new Map();
 
-// -------------------------- 日志工具 --------------------------
+// ===================== 日志工具 =====================
 const logAudit = (operation, userId, username, remoteAddr, details = "", level = "INFO") => {
   const logObj = {
     time: dayjs().format('YYYY-MM-DD HH:mm:ss'),
@@ -89,24 +91,22 @@ const logAudit = (operation, userId, username, remoteAddr, details = "", level =
     remoteAddr: remoteAddr || 'unknown',
     details
   };
-  console.log(JSON.stringify(logObj));
+  console.log(`[AUDIT] ${JSON.stringify(logObj)}`);
 };
 
-// -------------------------- 数据库工具 --------------------------
+// ===================== 数据库工具 =====================
 // 获取数据库连接
 const getDbConnection = async () => {
   try {
-    console.log(`尝试连接数据库：${DB_CONFIG.host}:${DB_CONFIG.port}`);
     const connection = await mysql.createConnection({
       ...DB_CONFIG,
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0
     });
-    console.log('数据库连接成功');
     return connection;
   } catch (err) {
-    console.error('数据库连接失败：', err.message);
+    console.error('❌ 数据库连接失败：', err.message);
     throw new Error(`数据库连接失败：${err.message}`);
   }
 };
@@ -115,7 +115,7 @@ const getDbConnection = async () => {
 const initializeDatabase = async () => {
   let connection = null;
   try {
-    // 先连接服务器创建数据库（使用普通query，不使用execute）
+    // 先连接服务器创建数据库
     connection = await mysql.createConnection({
       host: DB_CONFIG.host,
       port: DB_CONFIG.port,
@@ -125,11 +125,11 @@ const initializeDatabase = async () => {
       ssl: DB_CONFIG.ssl
     });
 
-    // 修复：用query代替execute执行CREATE DATABASE（避免预处理语句报错）
+    // 创建数据库（不存在则创建）
     await connection.query(`CREATE DATABASE IF NOT EXISTS ${DB_CONFIG.database} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`);
     await connection.query(`USE ${DB_CONFIG.database};`);
 
-    // 创建用户表（继续用execute，表结构语句不受影响）
+    // 创建用户表
     const createUserTable = `
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY COMMENT '用户ID',
@@ -161,9 +161,23 @@ const initializeDatabase = async () => {
     `;
     await connection.execute(createScoreTable);
 
-    console.log('数据库表结构初始化完成');
+    // 插入默认管理员账号
+    const adminUsername = 'admin001';
+    const adminPassword = 'Admin@123456';
+    const [adminRows] = await connection.execute(`SELECT id FROM users WHERE username = ? LIMIT 1`, [adminUsername]);
+    
+    if (adminRows.length === 0) {
+      const hashedPwd = bcrypt.hashSync(adminPassword, BCRYPT_ROUNDS);
+      await connection.execute(`
+        INSERT INTO users (username, password, role)
+        VALUES (?, ?, 'admin')
+      `, [adminUsername, hashedPwd]);
+      console.log(`✅ 默认管理员账号创建成功：${adminUsername}/${adminPassword}`);
+    }
+
+    console.log('✅ 数据库表结构初始化完成');
   } catch (err) {
-    console.error('数据库初始化失败：', err.message);
+    console.error('❌ 数据库初始化失败：', err.message);
     logAudit('数据库初始化', -1, 'system', 'localhost', `错误：${err.message}`, 'ERROR');
   } finally {
     if (connection) {
@@ -172,7 +186,7 @@ const initializeDatabase = async () => {
   }
 };
 
-// -------------------------- 安全工具 --------------------------
+// ===================== 安全工具 =====================
 // 密码哈希
 const hashPassword = (plainPassword) => {
   const salt = bcrypt.genSaltSync(BCRYPT_ROUNDS);
@@ -286,55 +300,7 @@ const clearAttempts = (key) => {
   loginAttempts.delete(key);
 };
 
-// -------------------------- 缓存工具 --------------------------
-// 缓存装饰器
-const cacheResult = (expire = 300) => {
-  return (target, propertyKey, descriptor) => {
-    const originalMethod = descriptor.value;
-    
-    descriptor.value = async function (...args) {
-      // Redis不可用则直接执行
-      if (!redisClient) {
-        return await originalMethod.apply(this, args);
-      }
-      
-      try {
-        // 生成缓存键
-        const argsStr = args.map(arg => {
-          if (typeof arg === 'object') {
-            return JSON.stringify({
-              user_id: arg.user_id,
-              username: arg.username
-            });
-          }
-          return String(arg);
-        }).join('_');
-        
-        const key = `cache:${propertyKey}:${crypto.createHash('md5').update(argsStr).digest('hex')}`;
-        
-        // 获取缓存
-        const cached = await redisClient.get(key);
-        if (cached) {
-          return JSON.parse(cached);
-        }
-        
-        // 执行原方法
-        const result = await originalMethod.apply(this, args);
-        
-        // 设置缓存
-        await redisClient.setex(key, expire, JSON.stringify(result));
-        return result;
-      } catch (err) {
-        console.error('缓存操作失败：', err.message);
-        return await originalMethod.apply(this, args);
-      }
-    };
-    
-    return descriptor;
-  };
-};
-
-// -------------------------- 成绩统计工具 --------------------------
+// ===================== 成绩统计工具 =====================
 // 计算级部排名
 const calculateGradeRank = async (examDate, subject, score) => {
   const connection = await getDbConnection();
@@ -596,7 +562,7 @@ const getRankChange = async (userId, examDate, currentGradeRank) => {
   }
 };
 
-// -------------------------- 中间件 --------------------------
+// ===================== 中间件 =====================
 // 认证中间件
 const authRequired = (req, res, next) => {
   try {
@@ -703,7 +669,7 @@ const handleException = (apiName) => {
   };
 };
 
-// -------------------------- API接口 --------------------------
+// ===================== API接口 =====================
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({
@@ -1558,16 +1524,7 @@ app.route('/api/student/change-password')
     }));
   });
 
-// -------------------------- 静态网页托管 --------------------------
-// 托管api文件夹下的静态文件
-app.use('/api', express.static('api'));
-
-// 首页路由
-app.get('/', (req, res) => {
-  res.sendFile('index.html', { root: 'api' });
-});
-
-// -------------------------- 启动服务 --------------------------
+// ===================== 启动服务 =====================
 // 初始化数据库并启动服务
 const startServer = async () => {
   try {
@@ -1577,13 +1534,14 @@ const startServer = async () => {
     // 启动HTTP服务
     app.listen(PORT, () => {
       console.log('='.repeat(60));
-      console.log('成绩管理系统后端服务启动成功！');
-      console.log(`服务环境：${ENV}`);
-      console.log(`服务地址：http://localhost:${PORT}`);
+      console.log('🎯 成绩管理系统后端服务启动成功！');
+      console.log(`🔧 服务环境：${ENV}`);
+      console.log(`🌐 服务地址：http://localhost:${PORT}`);
+      console.log(`🔑 默认管理员账号：admin001/Admin@123456`);
       console.log('='.repeat(60));
     });
   } catch (err) {
-    console.error('服务启动失败：', err.message);
+    console.error('❌ 服务启动失败：', err.message);
     process.exit(1);
   }
 };
